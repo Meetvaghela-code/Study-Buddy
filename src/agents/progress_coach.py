@@ -15,14 +15,12 @@ import os
 from datetime import datetime, timezone
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
-from langchain_ollama import ChatOllama
 
+from agents.llm_utils import create_llm, invoke_llm
 from graph.state import QuizResult, StudyRoadmap, get_latest_quiz_result
 from mcp_servers.memory_server import memory_set
 
 
-MODEL_NAME = os.getenv("OLLAMA_MODEL", "qwen2.5:7b")
-OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 PASS_THRESHOLD = 0.5
 
 # A2A service URL, read from env so it's configurable
@@ -49,12 +47,7 @@ Never be discouraging. A low score means "more practice needed", not "you failed
 
 def get_coaching_message(topic: str, score: float, weak_areas: list[str]) -> dict:
     """Ask the LLM for a personalised coaching message."""
-    llm = ChatOllama(
-        model=MODEL_NAME,
-        base_url=OLLAMA_BASE_URL,
-        temperature=0.4,
-        format="json",
-    )
+    llm = create_llm(temperature=0.4, format="json")
 
     context = {
         "topic":         topic,
@@ -63,7 +56,7 @@ def get_coaching_message(topic: str, score: float, weak_areas: list[str]) -> dic
     }
 
     try:
-        response = llm.invoke([
+        response = invoke_llm(llm, [
             SystemMessage(content=COACHING_PROMPT),
             HumanMessage(content=json.dumps(context)),
         ])
@@ -212,10 +205,10 @@ def progress_coach_node(state: dict) -> dict:
     if latest.weak_areas:
         print(f"[Progress Coach] Weak areas: {', '.join(latest.weak_areas)}")
 
-    # ── Get coaching message ──────────────────────────────────────────
+    # -- Get coaching message ------------------------------------------
     coaching = get_coaching_message(latest.topic, score, latest.weak_areas)
 
-    # ── Update topic status ───────────────────────────────────────────
+    # -- Update topic status -------------------------------------------
     topics = roadmap.get("topics", []) if isinstance(roadmap, dict) else roadmap.topics
     if idx < len(topics):
         topic = topics[idx]
@@ -225,11 +218,11 @@ def progress_coach_node(state: dict) -> dict:
         else:
             topic.status = new_status
 
-    # ── Advance to next topic ─────────────────────────────────────────
+    # -- Advance to next topic -----------------------------------------
     next_idx = idx + 1
     all_done = next_idx >= len(topics)
 
-    # ── Persist progress via MCP memory ──────────────────────────────
+    # -- Persist progress via MCP memory ------------------------------
     # Safe status read, guard idx before subscripting
     _topic_obj = topics[idx] if idx < len(topics) else None
     _status = (
@@ -246,8 +239,8 @@ def progress_coach_node(state: dict) -> dict:
     })
     memory_set(session_id, f"progress_topic_{idx}", progress_data)
 
-    # ── Print coaching message ────────────────────────────────────────
-    print(f"\n{'─'*60}")
+    # -- Print coaching message ----------------------------------------
+    print(f"\n{'-'*60}")
     print(f"Coach: {coaching['summary']}")
     print(f"{coaching['encouragement']}")
 
@@ -255,16 +248,21 @@ def progress_coach_node(state: dict) -> dict:
         completed = sum(1 for t in topics if (t.get("status") if isinstance(t, dict) else t.status) == "completed")
         total = len(topics)
         results = state.get("quiz_results", [])
-        avg = sum(r.score for r in results) / max(len(results), 1)
+        def _result_score(result: object) -> float:
+            if isinstance(result, dict):
+                return float(result.get("score", 0.0))
+            return float(getattr(result, "score", 0.0))
+
+        avg = sum(_result_score(r) for r in results) / max(len(results), 1)
         print(f"\nSession complete! {completed}/{total} topics passed.")
         print(f"Overall average: {avg:.0%}")
     else:
         next_topic = topics[next_idx]
         next_title = next_topic.get("title") if isinstance(next_topic, dict) else next_topic.title
         print(f"\nNext topic: '{next_title}'")
-    print(f"{'─'*60}\n")
+    print(f"{'-'*60}\n")
 
-    # ── Optional: CrewAI Study Buddy for low scores ───────────────────
+    # -- Optional: CrewAI Study Buddy for low scores -------------------
     # When a student scores below the pass threshold, request supplementary
     # help from the CrewAI Study Buddy via A2A.
     # This is where LangGraph calls CrewAI through the A2A protocol.
@@ -284,10 +282,10 @@ def progress_coach_node(state: dict) -> dict:
         )
 
         if assistance:
-            print(f"\n{'─'*60}")
-            print("Study Buddy (via CrewAI → A2A):")
+            print(f"\n{'-'*60}")
+            print("Study Buddy (via CrewAI -> A2A):")
             print(assistance)
-            print(f"{'─'*60}\n")
+            print(f"{'-'*60}\n")
 
     return {
         "roadmap":               roadmap,

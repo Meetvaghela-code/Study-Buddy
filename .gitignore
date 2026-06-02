@@ -35,3 +35,7 @@ windsurf_batches/
 # Test caches
 .pytest_cache/
 .deepeval/
+
+# Ignored Streamlit frontend
+streamlit_app.py
+

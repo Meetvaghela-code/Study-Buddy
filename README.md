@@ -45,18 +45,21 @@ compliance training, customer support onboarding, and engineering ramp-up.
 | Orchestration | LangGraph 1.1.0 | Stateful agent graph with checkpointing |
 | Tool integration | MCP (mcp 1.26.0) | Standardised agent-to-tool protocol |
 | Agent coordination | A2A (a2a-sdk 0.3.25) | Cross-framework agent-to-agent protocol |
+| Backend API | FastAPI (port 8000) | HTTP endpoints for roadmap approval, quiz, and graph progression |
+| Frontend UI | Next.js 14 / Tailwind CSS | Modern Claude-style dark theme UI (located in [frontendv3](file:///d:/Multi-Agent2/multi-agent-ai-system/frontendv3)) |
 | Local inference | Ollama | LLM serving at localhost:11434 |
 | Cross-framework | CrewAI 1.13.0 | Study Buddy agent (called via A2A) |
 | Observability | Langfuse 4.0.1 | Full trace of every agent and LLM call |
 | Evaluation | DeepEval 3.9.1 | LLM-as-judge quality metrics |
 
-See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for a full deep-dive.
+See [ARCHITECTURE.md](file:///d:/Multi-Agent2/multi-agent-ai-system/docs/ARCHITECTURE.md) for a full deep-dive.
 
 ---
 
 ## Requirements
 
 - Python 3.11+
+- Node.js 18+ (required for the Next.js frontend)
 - [Ollama](https://ollama.com) installed and running
 - Docker Desktop (for Langfuse observability, optional)
 - 16 GB RAM minimum, 32 GB recommended
@@ -66,30 +69,49 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for a full deep-dive.
 
 ## Quick start
 
+### 1. Set up Backend API
 ```bash
-# 1. Clone and set up
+# Clone the repository
 git clone https://github.com/sandeepmb/freecodecamp-multi-agent-ai-system
 cd freecodecamp-multi-agent-ai-system
-python -m venv .venv && source .venv/bin/activate
+
+# Create and activate virtual environment
+python -m venv .venv
+# On Windows (PowerShell):
+.venv\Scripts\Activate.ps1
+# On Linux/macOS:
+source .venv/bin/activate
+
+# Install requirements
 pip install -r requirements.txt
 
-# 2. Pull your model (choose based on VRAM)
-ollama pull qwen2.5:7b          # 8 GB VRAM
-ollama pull qwen2.5-coder:32b   # 24 GB VRAM
-
-# 3. Ensure Ollama is running
-ollama serve                  # in a separate terminal
-# Or on macOS: start the Ollama app from your Applications folder
-
-# 4. Configure
+# Configure environment variables
 cp .env.example .env
-# Edit .env: set OLLAMA_MODEL to match what you pulled
-
-# 5. Run
-python main.py
+# Edit .env and verify/change your OLLAMA_MODEL (e.g. qwen2.5:7b or qwen2.5-coder:32b)
 ```
 
-For the full system with A2A services and observability, see [Running all services](#running-all-services).
+### 2. Pull local LLMs (via Ollama)
+Ensure Ollama is running (`ollama serve` or run the Ollama app), then pull your chosen model:
+```bash
+ollama pull qwen2.5:7b          # 8 GB VRAM
+# Or for higher quality (requires more VRAM):
+ollama pull qwen2.5-coder:32b   # 24 GB VRAM
+```
+
+### 3. Run Backend API Server
+```bash
+python -m uvicorn src.server.api:app --reload --port 8000
+```
+*Note: This starts the HTTP API backend at `http://localhost:8000`.*
+
+### 4. Set up & Run Frontend (Next.js)
+In a new terminal window:
+```bash
+cd frontendv3
+npm install
+npm run dev
+```
+*Note: This starts the Claude-style user interface at `http://localhost:3000`.*
 
 ---
 
@@ -97,7 +119,12 @@ For the full system with A2A services and observability, see [Running all servic
 
 ```
 freecodecamp-multi-agent-ai-system/
+├── frontendv3/                 # Next.js 14 frontend (Claude-style UI)
+│   ├── app/                    # Next.js App Router pages
+│   ├── components/             # Reusable UI components
+│   └── package.json            # Frontend dependencies
 ├── src/
+│   ├── server/                 # FastAPI HTTP server (api.py)
 │   ├── agents/                 # LangGraph agent nodes
 │   │   ├── curriculum_planner.py
 │   │   ├── explainer.py
@@ -135,18 +162,21 @@ freecodecamp-multi-agent-ai-system/
 │   ├── ARCHITECTURE.md
 │   └── MODEL_SELECTION.md
 ├── data/                       # SQLite checkpoint DB (created at runtime)
-├── main.py                     # Entry point
+├── main.py                     # CLI entry point
 ├── docker-compose.yml          # Langfuse self-hosted stack
-├── Makefile                    # One-command startup
+├── Makefile                    # Automation commands
 ├── requirements.txt
 └── .env.example
 ```
+
+> [!NOTE]
+> The legacy `streamlit_app.py` has been deprecated and is ignored by this project in favor of the Next.js `frontendv3` and FastAPI backend API setup.
 
 ---
 
 ## Running all services
 
-The full system has three processes. Open three terminal tabs.
+For a fully coordinated execution with A2A services (Quiz Generator and CrewAI Study Buddy) and the modern frontend, run the following processes:
 
 **Tab 1: Quiz Generator A2A service:**
 ```bash
@@ -162,24 +192,34 @@ python src/crewai_agent/study_buddy.py
 # Serves at http://localhost:9002
 ```
 
-**Tab 3: Main LangGraph application:**
+**Tab 3: Backend API Server:**
 ```bash
 source .venv/bin/activate
-python main.py
+python -m uvicorn src.server.api:app --reload --port 8000
+# Serves at http://localhost:8000
 ```
 
-Or use the Makefile:
+**Tab 4: Frontend App:**
 ```bash
-make services   # starts both A2A services in background
-make run        # runs the main application
+cd frontendv3
+npm install
+npm run dev
+# Serves at http://localhost:3000
+```
+
+### Alternatively, using the Makefile:
+To run A2A services in the background and start the CLI application (optional):
+```bash
+make services   # starts both A2A services in the background
+make run        # runs the CLI entrypoint
 ```
 
 ---
 
 ## Session resume
 
-Every session is checkpointed to `data/checkpoints.db` after each agent node.
-To resume a stopped session:
+Every session is checkpointed to `data/checkpoints_api.db` (for API sessions) or `data/checkpoints.db` (for CLI sessions) after each agent node.
+To resume a stopped CLI session:
 
 ```bash
 python main.py --resume <session-id>
@@ -194,12 +234,10 @@ The session ID is printed at the start of every run.
 Start Langfuse locally:
 ```bash
 docker compose up -d
-# Open http://localhost:3000
+# Open http://localhost:3000 (Langfuse UI)
 ```
 
-Add your API keys to `.env` (from the Langfuse project settings), then run
-as normal. Every agent call, LLM completion, and tool call appears in the
-trace UI automatically.
+Add your API keys to `.env` (from the Langfuse project settings), then run the servers as normal. Every agent call, LLM completion, and tool call appears in the trace UI automatically.
 
 ---
 
@@ -220,8 +258,7 @@ pytest tests/test_eval.py -v -s -m eval
 ## Adding your own study materials
 
 Replace or add Markdown files in `study_materials/sample_notes/`.
-The Explainer agent reads every `.md` file in that directory automatically
-via the MCP filesystem server. No configuration changes needed.
+The Explainer agent reads every `.md` file in that directory automatically via the MCP filesystem server. No configuration changes needed.
 
 ---
 
@@ -236,23 +273,3 @@ Key toggles:
 | `USE_A2A_QUIZ` | `true` | Route quiz tasks to A2A service |
 | `USE_STUDY_BUDDY` | `true` | Call CrewAI Study Buddy for low scores |
 | `CHECKPOINT_DB` | `data/checkpoints.db` | SQLite path for checkpoints |
-
----
-
-## Article
-
-This code is the companion to the freeCodeCamp handbook:
-**How to Build Production-Grade Multi-Agent AI Systems with LangGraph, MCP, A2A, and Ollama**
-
-The handbook explains every architectural decision, walks through each
-agent step by step, and covers the production patterns that make this
-system different from a basic tutorial.
-
----
-
-## Author
-
-**Sandeep Bharadwaj Mannapur**
-Lead Data and AI/ML Engineer with 15+ years in financial services and enterprise SaaS.
-
-[GitHub](https://github.com/sandeepmb) · [freeCodeCamp](https://www.freecodecamp.org/news/author/sandeep-mannapur/)

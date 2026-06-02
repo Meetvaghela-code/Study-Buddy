@@ -116,7 +116,7 @@ def get_langfuse_config(
     handler = get_langfuse_handler(session_id, user_id)
     if handler:
         config["callbacks"] = [handler]
-        print(f"[Observability] Tracing session {session_id} → "
+        print(f"[Observability] Tracing session {session_id} -> "
               f"{os.getenv('LANGFUSE_HOST', 'http://localhost:3000')}")
     else:
         print("[Observability] Langfuse not configured. Running without tracing.")

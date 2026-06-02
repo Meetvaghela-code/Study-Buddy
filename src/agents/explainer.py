@@ -29,6 +29,7 @@ Integration note:
 
 import json
 import os
+import sys
 
 from langchain_core.messages import (
     AIMessage,
@@ -37,8 +38,8 @@ from langchain_core.messages import (
     ToolMessage,
 )
 from langchain_core.tools import tool
-from langchain_ollama import ChatOllama
 
+from agents.llm_utils import create_llm, invoke_llm
 from graph.state import get_current_topic
 from mcp_servers.filesystem_server import (
     list_study_files,
@@ -48,12 +49,15 @@ from mcp_servers.filesystem_server import (
 from mcp_servers.memory_server import memory_get, memory_set
 
 
+for stream in (sys.stdout, sys.stderr):
+    if hasattr(stream, "reconfigure"):
+        stream.reconfigure(encoding="utf-8", errors="backslashreplace")
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Model configuration
 # ─────────────────────────────────────────────────────────────────────────────
 
-MODEL_NAME = os.getenv("OLLAMA_MODEL", "qwen2.5:7b")
-OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -163,11 +167,13 @@ APPROACH, follow this sequence:
 5. Write your explanation based on what you found in the notes
 
 EXPLANATION FORMAT:
-- Start with a real-world analogy (1-2 sentences)
-- State the core concept clearly (2-3 sentences)
-- Show a concrete code example from the student's notes
-- End with one "common mistake" or "gotcha" to watch out for
-- Target length: 300-500 words
+- Start with intuition or a real-world analogy (1-2 sentences)
+- Explain the concept step by step in a learner-friendly sequence
+- Include a concrete example from the student's notes when available
+- Add a short "why this matters" section
+- Include common mistakes or gotchas to watch out for
+- End with a short recap the learner can review before the quiz
+- Target length: 450-700 words
 
 After writing the explanation, store what you explained:
   tool_memory_set(session_id, 'explained_topics', <comma-separated topic titles>)
@@ -248,11 +254,7 @@ def explainer_node(state: dict) -> dict:
     # bind_tools() tells the LLM what tools are available.
     # The LLM receives the tool schemas (names, descriptions, arg types)
     # as part of the context and can request any of them.
-    llm = ChatOllama(
-        model=MODEL_NAME,
-        base_url=OLLAMA_BASE_URL,
-        temperature=0.3,   # Slightly higher than planner, explanations can be creative
-    ).bind_tools(EXPLAINER_TOOLS)
+    llm = create_llm(temperature=0.3).bind_tools(EXPLAINER_TOOLS)
 
     # ── Build initial messages ────────────────────────────────────────
     messages = [
@@ -273,7 +275,7 @@ def explainer_node(state: dict) -> dict:
     for iteration in range(max_iterations):
         print(f"[Explainer] LLM call {iteration + 1}/{max_iterations}...")
         try:
-            response = llm.invoke(messages)
+            response = invoke_llm(llm, messages)
         except Exception as e:
             print(f"[Explainer] LLM call failed: {e}")
             return {
@@ -293,13 +295,13 @@ def explainer_node(state: dict) -> dict:
         for tool_call in response.tool_calls:
             tool_name = tool_call["name"]
             tool_args = tool_call["args"]
-            print(f"  → {tool_name}({tool_args})")
+            print(f"  -> {tool_name}({tool_args})")
 
             result = execute_tool_call(tool_call)
 
             # Truncate very long results in the log (not in the message)
             log_result = result[:100] + "..." if len(result) > 100 else result
-            print(f"    ← {log_result}")
+            print(f"    <- {log_result}")
 
             # Append ToolMessage, the LLM sees this as the tool's response
             messages.append(ToolMessage(

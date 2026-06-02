@@ -44,7 +44,7 @@ from a2a.types import (
     TextPart,
 )
 
-from agents.quiz_generator import generate_questions, grade_answer
+from agents.quiz_generator import generate_questions, grade_answer, grade_selected_options
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -80,8 +80,8 @@ QUIZ_AGENT_CARD = AgentCard(
     ),
     url="http://localhost:9001/",
     version="1.0.0",
-    defaultInputModes=["text"],
-    defaultOutputModes=["text"],
+    default_input_modes=["text"],
+    default_output_modes=["text"],
     capabilities=AgentCapabilities(streaming=False),
     skills=[QUIZ_SKILL],
 )
@@ -103,17 +103,18 @@ class QuizAgentExecutor(AgentExecutor):
     {
         "topic":       "Python Closures",
         "explanation": "A closure is...",   (optional)
-        "answers":     ["answer 1", ...]    (optional, omit to just get questions)
+        "answers":     [["A"], ["B", "D"]]  (optional, omit to just get questions)
     }
 
     Response format (JSON in the text part):
     {
-        "status":   "questions_ready" | "graded",
-        "topic":    "Python Closures",
-        "questions": [...],            (always present)
+        "status":   "questions_ready" | "graded" | "error",
+        "topic":    "Python Closures" | string,
+        "questions": [...],            (always present on non-error)
         "score":    0.75,              (only when answers provided)
         "graded_questions": [...],     (only when answers provided)
         "weak_areas": [...]            (only when answers provided)
+        "error":    "..."             (only when status == error)
     }
     """
 
@@ -122,90 +123,149 @@ class QuizAgentExecutor(AgentExecutor):
         context: RequestContext,
         event_queue: EventQueue,
     ) -> None:
-        """Process an incoming quiz task."""
-
-        # ── Parse request ─────────────────────────────────────────────
-        request_text = ""
-        for part in context.current_request.params.message.parts:
-            if isinstance(part, TextPart):
-                request_text += part.text
+        """Process an incoming A2A quiz task."""
 
         try:
-            request_data = json.loads(request_text)
-        except json.JSONDecodeError:
-            # If it's not JSON, treat the whole thing as a topic
-            request_data = {"topic": request_text, "explanation": ""}
+            # ── Parse request ─────────────────────────────────────────────
+            request_text = ""
+            # A2A RequestContext contains the incoming request envelope.
+            # We read the text parts from the message payload.
+            msg = getattr(context, "current_request", None) or getattr(context, "request", None) or getattr(context, "incoming_request", None)
+            parts = []
+            try:
+                parts = msg.params.message.parts  # type: ignore[attr-defined]
+            except Exception:
+                parts = []
 
-        topic = request_data.get("topic", "General Knowledge")
-        explanation = request_data.get("explanation", "")
-        provided_answers = request_data.get("answers", [])
+            for part in parts:
+                if isinstance(part, TextPart):
+                    request_text += part.text
 
-        print(f"[Quiz A2A] Task received: topic='{topic}', "
-              f"answers_provided={len(provided_answers)}")
 
-        # ── Generate questions ────────────────────────────────────────
-        # Run in thread pool since it's a synchronous blocking call
-        questions_data = await asyncio.to_thread(
-            generate_questions, topic, explanation, 3
-        )
+            try:
+                request_data = json.loads(request_text)
+            except json.JSONDecodeError:
+                # If it's not JSON, treat the whole thing as a topic
+                request_data = {"topic": request_text, "explanation": ""}
 
-        if not provided_answers:
-            # No answers provided, return questions only
-            result = {
-                "status": "questions_ready",
-                "topic": topic,
-                "questions": questions_data,
-                "message": (
-                    "Questions generated. Submit again with 'answers' key to grade."
-                ),
-            }
-        else:
-            # Grade the provided answers
-            graded = []
-            total_score = 0.0
-            weak_areas = []
+            topic = request_data.get("topic", "General Knowledge")
+            explanation = request_data.get("explanation", "")
+            provided_answers = request_data.get("answers", [])
 
-            for q_data, answer in zip(questions_data, provided_answers):
-                grade = await asyncio.to_thread(
-                    grade_answer,
-                    q_data["question"],
-                    q_data["expected_answer"],
-                    answer,
-                )
-                score = float(grade.get("score", 0.0))
-                total_score += score
-                missing = grade.get("missing_concept", "")
-                if missing:
-                    weak_areas.append(missing)
+            if not isinstance(provided_answers, list):
+                provided_answers = []
 
-                graded.append({
-                    "question":  q_data["question"],
-                    "answer":    answer,
-                    "score":     score,
-                    "correct":   bool(grade.get("correct", False)),
-                    "feedback":  grade.get("feedback", ""),
-                })
-
-            avg_score = total_score / len(questions_data) if questions_data else 0.0
-
-            result = {
-                "status":           "graded",
-                "topic":            topic,
-                "score":            avg_score,
-                "questions":        questions_data,
-                "graded_questions": graded,
-                "weak_areas":       list(set(weak_areas)),
-            }
-
-        print(f"[Quiz A2A] Task complete: status={result['status']}")
-
-        # ── Emit result ───────────────────────────────────────────────
-        await event_queue.enqueue_event(
-            Message(
-                role="agent",
-                parts=[TextPart(text=json.dumps(result, indent=2))],
+            print(
+                f"[Quiz A2A] Task received: topic='{topic}', "
+                f"answers_provided={len(provided_answers)}"
             )
-        )
+
+            # ── Generate questions ────────────────────────────────────────
+            questions_data = await asyncio.to_thread(
+                generate_questions, topic, explanation
+            )
+
+            if not provided_answers:
+                # No answers provided, return questions only
+                result = {
+                    "status": "questions_ready",
+                    "topic": topic,
+                    "questions": questions_data,
+                    "message": (
+                        "Questions generated. Submit again with 'answers' key to grade."
+                    ),
+                }
+            else:
+                # Grade the provided answers
+                graded = []
+                total_score = 0.0
+                weak_areas = []
+
+                # Grade only up to the number of provided answers
+                for i, answer in enumerate(provided_answers):
+                    if i >= len(questions_data):
+                        break
+                    q_data = questions_data[i] or {}
+                    question_text = q_data.get("question", "")
+                    expected_answer = q_data.get("expected_answer", "")
+                    options = q_data.get("options", [])
+                    correct_option_ids = q_data.get("correct_option_ids", [])
+
+                    if options and correct_option_ids and isinstance(answer, list):
+                        grade = grade_selected_options(
+                            question_text,
+                            expected_answer,
+                            options,
+                            correct_option_ids,
+                            answer,
+                        )
+                    else:
+                        grade = await asyncio.to_thread(
+                            grade_answer,
+                            question_text,
+                            expected_answer,
+                            str(answer),
+                        )
+                    score = float(grade.get("score", 0.0))
+                    total_score += score
+                    missing = grade.get("missing_concept", "")
+                    if missing:
+                        weak_areas.append(missing)
+
+                    graded.append({
+                        "question": question_text,
+                        "answer": answer,
+                        "selected_option_ids": answer if isinstance(answer, list) else [],
+                        "expected_answer": expected_answer,
+                        "score": score,
+                        "correct": bool(grade.get("correct", False)),
+                        "feedback": grade.get("feedback", ""),
+                    })
+
+                avg_score = total_score / len(questions_data) if questions_data else 0.0
+
+                result = {
+                    "status": "graded",
+                    "topic": topic,
+                    "score": avg_score,
+                    "questions": questions_data,
+                    "graded_questions": graded,
+                    "weak_areas": list(set(weak_areas)),
+                }
+
+            print(f"[Quiz A2A] Task complete: status={result['status']}")
+
+            # ── Emit result ───────────────────────────────────────────────
+            # Some A2A framework versions require message_id.
+            # Provide it defensively.
+            await event_queue.enqueue_event(
+                Message(
+                    role="agent",
+                    parts=[TextPart(text=json.dumps(result, indent=2))],
+                    message_id=getattr(context, "message_id", None) or None,
+                )
+            )
+
+        except Exception as e:
+            # Prevent framework-level 500s: always emit an error result.
+            err_msg = f"{type(e).__name__}: {e}"
+            print(f"[Quiz A2A] Task failed: {err_msg}")
+
+            result = {
+                "status": "error",
+                "topic": "General Knowledge",
+                "questions": [],
+                "error": err_msg,
+            }
+
+            await event_queue.enqueue_event(
+                Message(
+                    role="agent",
+                    parts=[TextPart(text=json.dumps(result, indent=2))],
+                    message_id=getattr(context, "message_id", None) or None,
+                )
+            )
+
 
     async def cancel(
         self,

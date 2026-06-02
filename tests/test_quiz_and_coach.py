@@ -29,7 +29,13 @@ from graph.state import (
     get_latest_quiz_result,
     session_is_complete,
 )
-from agents.quiz_generator import generate_questions, grade_answer
+from agents.quiz_generator import (
+    choose_question_count,
+    fallback_questions,
+    generate_questions,
+    grade_answer,
+    grade_selected_options,
+)
 from agents.progress_coach import progress_coach_node, PASS_THRESHOLD
 from graph.workflow import route_after_coach
 
@@ -45,6 +51,13 @@ class TestGenerateQuestions:
         questions = [
             {
                 "question": f"Question {i}?",
+                "options": [
+                    {"id": "A", "text": f"Correct answer {i}"},
+                    {"id": "B", "text": f"Distractor {i}"},
+                    {"id": "C", "text": f"Another distractor {i}"},
+                    {"id": "D", "text": f"Second correct answer {i}"},
+                ],
+                "correct_option_ids": ["A", "D"] if i == 0 else ["A"],
                 "expected_answer": f"Answer {i}",
                 "difficulty": "medium",
             }
@@ -52,49 +65,89 @@ class TestGenerateQuestions:
         ]
         return json.dumps({"questions": questions})
 
-    @patch("agents.quiz_generator.ChatOllama")
-    def test_returns_questions_from_valid_json(self, mock_ollama):
+    @patch("agents.quiz_generator.create_llm")
+    def test_returns_questions_from_valid_json(self, mock_create_llm):
         """Valid LLM JSON response should return a list of questions."""
         mock_llm = MagicMock()
         mock_llm.invoke.return_value = MagicMock(content=self._make_valid_json(3))
-        mock_ollama.return_value.bind_tools = MagicMock(return_value=mock_llm)
-        mock_ollama.return_value = mock_llm
+        mock_create_llm.return_value = mock_llm
 
         result = generate_questions("Closures", "explanation text", n=3)
         assert isinstance(result, list)
         assert len(result) == 3
         assert result[0]["question"] == "Question 0?"
+        assert len(result[0]["options"]) == 4
+        assert result[0]["correct_option_ids"] == ["A", "D"]
+        assert result[0]["expected_answer"] == "Answer 0"
 
-    @patch("agents.quiz_generator.ChatOllama")
-    def test_fallback_on_invalid_json(self, mock_ollama):
-        """Invalid JSON should return one fallback question, not raise."""
+    @patch("agents.quiz_generator.create_llm")
+    def test_fallback_on_invalid_json(self, mock_create_llm):
+        """Invalid JSON should return varied fallback questions, not raise."""
         mock_llm = MagicMock()
         mock_llm.invoke.return_value = MagicMock(content="this is not json {{{")
-        mock_ollama.return_value = mock_llm
+        mock_create_llm.return_value = mock_llm
 
         result = generate_questions("Closures", "explanation", n=3)
         assert isinstance(result, list)
-        assert len(result) == 1
+        assert len(result) == 3
         assert "Closures" in result[0]["question"]
+        assert len(result[0]["options"]) == 4
+        assert result[0]["correct_option_ids"]
+        assert "main idea" not in result[0]["question"].lower()
 
-    @patch("agents.quiz_generator.ChatOllama")
-    def test_fallback_on_missing_questions_key(self, mock_ollama):
-        """JSON without 'questions' key should return fallback."""
+    @patch("agents.quiz_generator.create_llm")
+    def test_fallback_on_missing_questions_key(self, mock_create_llm):
+        """JSON without 'questions' key should return fallback questions."""
         mock_llm = MagicMock()
         mock_llm.invoke.return_value = MagicMock(
             content=json.dumps({"something_else": []})
         )
-        mock_ollama.return_value = mock_llm
+        mock_create_llm.return_value = mock_llm
 
         result = generate_questions("Topic", "explanation", n=2)
-        assert len(result) == 1  # fallback
+        assert len(result) == 2
+
+    @patch("agents.quiz_generator.create_llm")
+    def test_rejects_generic_llm_question(self, mock_create_llm):
+        """Generic main-concept questions should not pass normalization."""
+        mock_llm = MagicMock()
+        mock_llm.invoke.return_value = MagicMock(content=json.dumps({
+            "questions": [{
+                "question": "Which option best captures the main concept of Java?",
+                "options": [
+                    {"id": "A", "text": "Java is a language."},
+                    {"id": "B", "text": "Wrong"},
+                    {"id": "C", "text": "Wrong"},
+                    {"id": "D", "text": "Wrong"},
+                ],
+                "correct_option_ids": ["A"],
+                "expected_answer": "Java is a language.",
+                "difficulty": "easy",
+            }]
+        }))
+        mock_create_llm.return_value = mock_llm
+
+        result = generate_questions("Java Introduction", "Java runs on the JVM.", n=2)
+        assert len(result) == 2
+        assert all("main concept" not in q["question"].lower() for q in result)
+
+    def test_question_count_is_adaptive(self):
+        assert choose_question_count("Short topic", "Tiny note.") == 2
+        assert choose_question_count("Common mistakes", "Mistake and gotcha examples.") == 3
+        assert choose_question_count("Java syntax", "```java\npublic static void main(String[] args) {}\n```") == 4
+
+    def test_fallback_questions_are_varied(self):
+        result = fallback_questions("Java Introduction", "Java runs on the JVM.", n=3)
+        assert len(result) == 3
+        assert len({q["question"] for q in result}) == 3
+        assert all("main idea" not in q["question"].lower() for q in result)
 
 
 class TestGradeAnswer:
     """Tests for the grading function."""
 
-    @patch("agents.quiz_generator.ChatOllama")
-    def test_returns_grade_dict_from_valid_json(self, mock_ollama):
+    @patch("agents.quiz_generator.create_llm")
+    def test_returns_grade_dict_from_valid_json(self, mock_create_llm):
         """Valid grading JSON should return dict with expected keys."""
         grade_json = json.dumps({
             "correct": True,
@@ -104,23 +157,53 @@ class TestGradeAnswer:
         })
         mock_llm = MagicMock()
         mock_llm.invoke.return_value = MagicMock(content=grade_json)
-        mock_ollama.return_value = mock_llm
+        mock_create_llm.return_value = mock_llm
 
         result = grade_answer("What is a closure?", "A function capturing...", "My answer")
         assert result["correct"] is True
         assert result["score"] == 0.85
         assert "feedback" in result
 
-    @patch("agents.quiz_generator.ChatOllama")
-    def test_safe_default_on_invalid_json(self, mock_ollama):
+    @patch("agents.quiz_generator.create_llm")
+    def test_safe_default_on_invalid_json(self, mock_create_llm):
         """Invalid grading JSON should return safe default, not raise."""
         mock_llm = MagicMock()
         mock_llm.invoke.return_value = MagicMock(content="not json")
-        mock_ollama.return_value = mock_llm
+        mock_create_llm.return_value = mock_llm
 
         result = grade_answer("Q?", "Expected", "Student answer")
         assert "correct" in result
         assert "score" in result
+        assert result["score"] == 0.0
+
+
+class TestGradeSelectedOptions:
+    def _options(self):
+        return [
+            {"id": "A", "text": "Correct"},
+            {"id": "B", "text": "Wrong"},
+            {"id": "C", "text": "Also correct"},
+            {"id": "D", "text": "Wrong"},
+        ]
+
+    def test_fully_correct_selection(self):
+        result = grade_selected_options("Q?", "A and C are best.", self._options(), ["A", "C"], ["A", "C"])
+        assert result["correct"] is True
+        assert result["score"] == 1.0
+
+    def test_partially_correct_selection(self):
+        result = grade_selected_options("Q?", "A and C are best.", self._options(), ["A", "C"], ["A"])
+        assert result["correct"] is False
+        assert 0 < result["score"] < 1
+
+    def test_incorrect_extra_option_is_penalized(self):
+        result = grade_selected_options("Q?", "A is best.", self._options(), ["A"], ["A", "B"])
+        assert result["correct"] is False
+        assert result["score"] < 1
+
+    def test_empty_selection_scores_zero(self):
+        result = grade_selected_options("Q?", "A is best.", self._options(), ["A"], [])
+        assert result["correct"] is False
         assert result["score"] == 0.0
 
 

@@ -11,7 +11,7 @@ Run: python -m pytest tests/test_curriculum_planner.py -v
 
 import json
 import pytest
-from agents.curriculum_planner import parse_roadmap_json
+from agents.curriculum_planner import parse_roadmap_json, topic_count_guidance
 from graph.state import StudyRoadmap
 
 
@@ -117,3 +117,17 @@ class TestParseRoadmapJson:
         result = parse_roadmap_json(json.dumps(data))
         assert isinstance(result.topics[0].estimated_minutes, int)
         assert result.topics[0].estimated_minutes == 45
+
+
+class TestTopicCountGuidance:
+    def test_simple_goal_gets_short_plan(self):
+        assert "3 to 4 topics" in topic_count_guidance("Python basics")
+
+    def test_medium_goal_gets_medium_plan(self):
+        assert "5 to 7 topics" in topic_count_guidance("Learn Python closures and decorators")
+
+    def test_complex_goal_gets_long_plan(self):
+        guidance = topic_count_guidance(
+            "Master LangGraph checkpoints interrupts routing and multi-agent production systems"
+        )
+        assert "8 to 10 topics" in guidance

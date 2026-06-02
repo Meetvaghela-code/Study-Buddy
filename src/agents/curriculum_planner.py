@@ -20,20 +20,9 @@ import json
 import os
 
 from langchain_core.messages import HumanMessage, SystemMessage
-from langchain_ollama import ChatOllama
 
+from agents.llm_utils import create_llm, invoke_llm, MODEL_NAME
 from graph.state import StudyRoadmap, Topic
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Model configuration
-#
-# Read from .env so you can switch models without touching code.
-# Defaults to qwen2.5:7b which works on 8GB VRAM.
-# ─────────────────────────────────────────────────────────────────────────────
-
-MODEL_NAME = os.getenv("OLLAMA_MODEL", "qwen2.5:7b")
-OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -63,7 +52,7 @@ The JSON must match this exact schema:
   "topics": [
     {
       "title": "Short topic name (3-6 words)",
-      "description": "One clear sentence explaining what this topic covers",
+      "description": "Beginner-friendly learning objective and what this topic teaches",
       "estimated_minutes": <integer between 30 and 120>,
       "prerequisites": ["title of earlier topic if required, else empty list"],
       "status": "pending"
@@ -75,10 +64,36 @@ Rules:
 - Order topics from foundational to advanced
 - prerequisites must reference earlier topic titles exactly as written
 - estimated_minutes is time for one focused study session, not total time
-- Aim for 4 to 6 topics, enough depth without being overwhelming
-- Every topic must have a clear, specific description
+- Size the plan to the learning goal complexity:
+  - simple goals: 3 to 4 topics
+  - medium goals: 5 to 7 topics
+  - complex goals: 8 to 10 topics
+- Follow the topic count guidance in the user request when provided
+- Every topic description must explain what the learner will understand or be able to do
+- Keep descriptions learner-friendly and specific, not just a label
 - status must always be "pending"
 """
+
+
+def topic_count_guidance(goal: str) -> str:
+    """Return deterministic topic-count guidance for the planner prompt."""
+    words = [w for w in goal.replace(",", " ").split() if w.strip()]
+    goal_lower = goal.lower()
+    complex_markers = [
+        "master", "advanced", "architecture", "system", "systems",
+        "end-to-end", "production", "comprehensive", "complete",
+        "langgraph", "multi-agent", "from scratch to advanced",
+    ]
+    simple_markers = [
+        "basics", "intro", "introduction", "overview", "beginner",
+        "simple", "quick", "fundamentals",
+    ]
+
+    if any(marker in goal_lower for marker in complex_markers) or len(words) >= 10:
+        return "This is a complex goal. Create 8 to 10 topics."
+    if any(marker in goal_lower for marker in simple_markers) or len(words) <= 4:
+        return "This is a simple goal. Create 3 to 4 topics."
+    return "This is a medium-complexity goal. Create 5 to 7 topics."
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -89,25 +104,9 @@ Rules:
 # and makes it easier to test with different configurations.
 # ─────────────────────────────────────────────────────────────────────────────
 
-def build_planner_llm() -> ChatOllama:
-    """
-    Create the Ollama LLM client for the Curriculum Planner.
-
-    temperature=0.1, very low temperature for structured output.
-    Higher temperature introduces randomness that makes JSON parsing
-    less reliable. For creative tasks (like explanations) we use 0.3.
-    For structured output, stay at 0.1 or lower.
-
-    format="json", enables Ollama's JSON mode. The model will never
-    produce output that isn't valid JSON. This is a hard constraint
-    at the inference level, not just a prompt instruction.
-    """
-    return ChatOllama(
-        model=MODEL_NAME,
-        base_url=OLLAMA_BASE_URL,
-        temperature=0.1,
-        format="json",
-    )
+def build_planner_llm():
+    """Create the Ollama LLM client for the Curriculum Planner."""
+    return create_llm(temperature=0.1, format="json")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -214,14 +213,17 @@ def curriculum_planner_node(state: dict) -> dict:
     # HumanMessage  = the specific request (changes per call)
     messages = [
         SystemMessage(content=PLANNER_SYSTEM_PROMPT),
-        HumanMessage(content=f"Create a study roadmap for this learning goal: {goal}"),
+        HumanMessage(content=(
+            f"Create a study roadmap for this learning goal: {goal}\n"
+            f"{topic_count_guidance(goal)}"
+        )),
     ]
 
     # Call the LLM. This is a synchronous blocking call.
     # Under the hood, LangChain sends an HTTP POST to localhost:11434.
     print(f"[Curriculum Planner] Calling {MODEL_NAME}...")
     try:
-        response = llm.invoke(messages)
+        response = invoke_llm(llm, messages)
     except Exception as e:
         print(f"[Curriculum Planner] LLM call failed: {e}")
         return {

@@ -23,6 +23,8 @@ Agent Card:
 import asyncio
 import json
 import os
+import re
+import uuid
 
 import uvicorn
 from a2a.server.agent_execution import AgentExecutor, RequestContext
@@ -162,17 +164,20 @@ def build_study_buddy_crew(
             f"A student is studying '{topic}'. Here is the explanation they received:\n\n"
             f"{explanation[:1000]}\n\n"  # Limit to 1000 chars to stay within context
             f"{weak_areas_text}\n\n"
+            "Act like a senior teaching coach or professor who is explaining "
+            "the topic to a smart beginner who needs clarity, structure, and confidence. "
             "First use the topic_analyser tool to structure your approach. "
-            "Then provide: "
-            "1) A fresh analogy that explains the core concept differently, "
-            "2) One concrete example that illustrates the weak area(s), "
-            "3) One practical tip for remembering this concept. "
-            "Keep your response concise and encouraging (150-250 words)."
+            "Then provide a polished teaching response with these Markdown sections: "
+            "## Why this matters, ## Intuitive analogy, ## Worked example, "
+            "## Common mistake to avoid, and ## Memory tip. "
+            "Use clear, concrete language and keep the answer substantial (220-350 words). "
+            "Return only the final teaching response in clean Markdown. "
+            "Do not include tool-call syntax, XML tags, JSON, or internal reasoning."
         ),
         agent=study_buddy_agent,
         expected_output=(
-            "A structured study assistance response with a fresh analogy, "
-            "a concrete example targeting weak areas, and a memory tip."
+            "A polished Markdown teaching response with sections for why it matters, "
+            "an analogy, a worked example, a common mistake, and a memory tip."
         ),
     )
 
@@ -182,6 +187,44 @@ def build_study_buddy_crew(
         process=Process.sequential,
         verbose=False,
     )
+
+
+def _extract_final_assistance(crew_result: object) -> str:
+    """Pull the final assistant-facing text out of CrewAI's result wrapper."""
+    candidate_values: list[str] = []
+
+    tasks_output = getattr(crew_result, "tasks_output", None)
+    if isinstance(tasks_output, list) and tasks_output:
+        last_task = tasks_output[-1]
+        for attr_name in ("raw", "output", "result", "json_dict"):
+            value = getattr(last_task, attr_name, None)
+            if isinstance(value, str) and value.strip():
+                candidate_values.append(value.strip())
+            elif isinstance(value, dict):
+                for nested_key in ("raw", "output", "result", "text"):
+                    nested_value = value.get(nested_key)
+                    if isinstance(nested_value, str) and nested_value.strip():
+                        candidate_values.append(nested_value.strip())
+
+    for attr_name in ("raw", "output", "result", "text"):
+        value = getattr(crew_result, attr_name, None)
+        if isinstance(value, str) and value.strip():
+            candidate_values.append(value.strip())
+
+    candidate_values.append(str(crew_result).strip())
+
+    text = next((value for value in candidate_values if value), "")
+
+    if not text:
+        return ""
+
+    # Remove common tool-call wrappers or chain output that can leak through.
+    text = re.sub(r"<tool_call>.*?</tool_call>", "", text, flags=re.DOTALL | re.IGNORECASE)
+    text = re.sub(r"<tool_call\b.*?>", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"</tool_call>", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"^\s*\{\s*\"name\"\s*:\s*\"topic_analyser\".*?\}\s*", "", text, flags=re.DOTALL)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -244,15 +287,18 @@ class StudyBuddyExecutor(AgentExecutor):
         """Handle an incoming A2A study assistance task."""
 
         # ── Parse request ─────────────────────────────────────────────
-        request_text = ""
-        for part in context.current_request.params.message.parts:
-            if isinstance(part, TextPart):
-                request_text += part.text
+        request_text = context.get_user_input()
+        if not request_text:
+            raise ValueError("Missing incoming A2A message")
+
+        print(f"[Study Buddy A2A] Raw request: {request_text[:200]!r}")
 
         try:
             request_data = json.loads(request_text)
         except json.JSONDecodeError:
             request_data = {"topic": request_text}
+
+        print(f"[Study Buddy A2A] Parsed keys: {list(request_data.keys())}")
 
         topic = request_data.get("topic", "General Topic")
         explanation = request_data.get("explanation", "")
@@ -268,10 +314,10 @@ class StudyBuddyExecutor(AgentExecutor):
             crew = build_study_buddy_crew(topic, explanation, weak_areas)
             crew_result = await asyncio.to_thread(crew.kickoff)
 
-            # Extract the string output from CrewAI result
-            result_text = str(crew_result)
-            if hasattr(crew_result, "raw"):
-                result_text = crew_result.raw
+            # Extract the final human-facing response from CrewAI result.
+            result_text = _extract_final_assistance(crew_result)
+            if not result_text:
+                result_text = str(crew_result).strip()
 
             result = {
                 "source":      "crewai_study_buddy",
@@ -299,6 +345,7 @@ class StudyBuddyExecutor(AgentExecutor):
         # ── Emit result ───────────────────────────────────────────────
         await event_queue.enqueue_event(
             Message(
+                messageId=str(uuid.uuid4()),
                 role="agent",
                 parts=[TextPart(text=json.dumps(result, indent=2))],
             )

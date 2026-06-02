@@ -75,13 +75,15 @@ def send_task(
         "params": {
             "id":      task_id or str(uuid.uuid4()),
             "message": {
+                "messageId": str(uuid.uuid4()),
                 "role":  "user",
                 "parts": [{"type": "text", "text": message_text}],
             },
         },
     }
 
-    url = f"{base_url.rstrip('/')}/tasks/send"
+    # The installed A2A SDK serves JSON-RPC at the root path ('/').
+    url = f"{base_url.rstrip('/')}/"
     try:
         response = httpx.post(url, json=payload, timeout=timeout)
         response.raise_for_status()

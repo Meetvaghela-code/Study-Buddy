@@ -123,9 +123,12 @@ class QuizQuestion:
     """
     question: str
     expected_answer: str
+    options: list[dict[str, str]] = field(default_factory=list)
+    correct_option_ids: list[str] = field(default_factory=list)
 
     # Filled in after the user answers
     user_answer: str = ""
+    selected_option_ids: list[str] = field(default_factory=list)
     correct: bool = False
     feedback: str = ""          # One sentence of specific feedback from grader
     score: float = 0.0          # 0.0 – 1.0
