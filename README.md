@@ -2,6 +2,7 @@
 
 Build a complete multi-agent AI system that runs entirely on your machine.
 No API keys, no cloud dependencies, no ongoing cost.
+
 ---
 
 ## What this builds
