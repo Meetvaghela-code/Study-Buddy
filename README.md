@@ -2,11 +2,6 @@
 
 Build a complete multi-agent AI system that runs entirely on your machine.
 No API keys, no cloud dependencies, no ongoing cost.
-
-This project is the companion code for the freeCodeCamp handbook:
-**How to Build a Local Multi-Agent AI System with LangGraph, MCP, and A2A**
-(link to be added once published)
-
 ---
 
 ## What this builds
